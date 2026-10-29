@@ -1,0 +1,131 @@
+{
+  "discovered_at": "2026-10-29T04:09:12.617005+00:00",
+  "datasets": {
+    "institutions": {
+      "status": "SUCCESS",
+      "endpoint": "institutions",
+      "fields": {
+        "CERT": {
+          "present": true,
+          "sample_type": "int",
+          "sample_value": 10
+        },
+        "NAME": {
+          "present": true,
+          "sample_type": "str",
+          "sample_value": "Northeast Bank of Sanford"
+        },
+        "CITY": {
+          "present": true,
+          "sample_type": "str",
+          "sample_value": "Sanford"
+        },
+        "STALP": {
+          "present": true,
+          "sample_type": "str",
+          "sample_value": "ME"
+        },
+        "ACTIVE": {
+          "present": true,
+          "sample_type": "int",
+          "sample_value": 0
+        },
+        "BKCLASS": {
+          "present": true,
+          "sample_type": "str",
+          "sample_value": "SM"
+        }
+      },
+      "sample_record": {
+        "CITY": "Sanford",
+        "ACTIVE": 0,
+        "BKCLASS": "SM",
+        "CERT": 10,
+        "STALP": "ME",
+        "NAME": "Northeast Bank of Sanford",
+        "ID": "10"
+      }
+    },
+    "financials": {
+      "status": "SUCCESS",
+      "endpoint": "financials",
+      "fields": {
+        "CERT": {
+          "present": true,
+          "sample_type": "int",
+          "sample_value": 10002
+        },
+        "REPDTE": {
+          "present": true,
+          "sample_type": "str",
+          "sample_value": "19840331"
+        },
+        "ASSET": {
+          "present": true,
+          "sample_type": "int",
+          "sample_value": 27693
+        },
+        "DEP": {
+          "present": true,
+          "sample_type": "int",
+          "sample_value": 24983
+        },
+        "LNLSGR": {
+          "present": true,
+          "sample_type": "int",
+          "sample_value": 16008
+        },
+        "EQ": {
+          "present": true,
+          "sample_type": "int",
+          "sample_value": 1796
+        },
+        "NETINC": {
+          "present": true,
+          "sample_type": "int",
+          "sample_value": 63
+        },
+        "ROA": {
+          "present": true,
+          "sample_type": "float",
+          "sample_value": 0.9221311475409836
+        },
+        "ROE": {
+          "present": true,
+          "sample_type": "float",
+          "sample_value": 14.21
+        },
+        "NIM": {
+          "present": true,
+          "sample_type": "int",
+          "sample_value": 245
+        },
+        "NCLNLSR": {
+          "present": true,
+          "sample_type": "float",
+          "sample_value": 1.7241379310344827
+        },
+        "RBCRWAJ": {
+          "present": true,
+          "sample_type": "int",
+          "sample_value": 0
+        }
+      },
+      "sample_record": {
+        "NIM": 245,
+        "RBCRWAJ": 0,
+        "ROA": 0.9221311475409836,
+        "REPDTE": "19840331",
+        "ROE": 14.21,
+        "ASSET": 27693,
+        "NCLNLSR": 1.7241379310344827,
+        "CERT": 10002,
+        "LNLSGR": 16008,
+        "NETINC": 63,
+        "EQ": 1796,
+        "DEP": 24983,
+        "ID": "10002_19840331"
+      }
+    }
+  }
+}

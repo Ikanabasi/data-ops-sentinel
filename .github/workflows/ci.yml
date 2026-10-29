@@ -1,0 +1,25 @@
+
+name: DataOps Sentinel CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        run: python -m pip install pytest==9.2.0
+
+      - name: Run automated tests
+        run: python -m pytest -v

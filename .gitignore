@@ -1,0 +1,25 @@
+# Python environment
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Local datasets
+data/bronze/
+data/silver/
+data/gold/
+data/quarantine/
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# Azure and Terraform state
+.terraform/
+*.tfstate
+*.tfstate.*

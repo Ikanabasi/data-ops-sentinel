@@ -60,7 +60,7 @@ jobs:
       - name: Configure AWS credentials using OIDC
         uses: aws-actions/configure-aws-credentials@v6.3.0
         with:
-          role-to-assume: arn:aws:iam::833090648467:role/DataOpsSentinelGitHubPublisher
+          role-to-assume: arn:aws:iam::833090648467:role/DataOpsSentinelGitHubS3Publish
           aws-region: ca-central-1
           allowed-account-ids: "833090648467"
           role-session-name: DataOpsSentinelGitHub

@@ -3,40 +3,132 @@ name: DataOps Sentinel AWS Silver Pipeline
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Select the pipeline operation"
+        required: true
+        type: choice
+        default: verify
+        options:
+          - verify
+          - one-quarter
+          - full-backfill
 
 permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: dataops-sentinel-aws-silver
+  cancel-in-progress: false
+
 jobs:
-  verify-aws:
-    name: Verify GitHub to AWS connection
+  silver-pipeline:
+    name: FDIC Silver Cloud Pipeline
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 90
+
+    env:
+      AWS_REGION: ca-central-1
+      S3_BUCKET: dataops-sentinel-lake-ikana-2026
 
     steps:
+      # STEP 1: Download the project code
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials with OIDC
+      # STEP 2: Install Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # STEP 3: Install pipeline dependencies
+      - name: Install Python dependencies
+        if: inputs.mode != 'verify'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest boto3 pyarrow
+
+      # STEP 4: Run automated tests
+      - name: Run automated tests
+        if: inputs.mode != 'verify'
+        run: |
+          python -m pytest -v
+
+      # STEP 5: Authenticate with AWS
+      - name: Configure AWS credentials using OIDC
         uses: aws-actions/configure-aws-credentials@v6.3.0
         with:
-          role-to-assume: arn:aws:iam::833090648467:role/DataOpsSentinelGitHubS3Publish
+          role-to-assume: arn:aws:iam::833090648467:role/DataOpsSentinelGitHubPublisher
           aws-region: ca-central-1
           allowed-account-ids: "833090648467"
+          role-session-name: DataOpsSentinelGitHub
 
+      # STEP 6: Verify AWS authentication
       - name: Verify AWS identity
         run: |
           aws sts get-caller-identity
 
+      # STEP 7: Verify S3 access
       - name: Verify S3 access
         run: |
           aws s3api list-objects-v2 \
-            --bucket dataops-sentinel-lake-ikana-2026 \
+            --bucket "$S3_BUCKET" \
             --prefix silver/fdic/financials/ \
-            --max-items 1
+            --max-items 1 \
+            --region "$AWS_REGION"
 
-      - name: Confirmation
+      # STEP 8: Ingest Q1 2021
+      - name: Ingest one test quarter
+        if: inputs.mode == 'one-quarter'
         run: |
-          echo "GitHub OIDC authentication successful"
-          echo "AWS S3 access verified"
+          python -m src.ingestion.historical_backfill \
+            --start 20210331 \
+            --end 20210331
+
+      # STEP 9: Transform and upload Q1 2021
+      - name: Transform and publish one quarter
+        if: inputs.mode == 'one-quarter'
+        run: |
+          python -m src.pipeline.run_historical_silver \
+            --start 20210331 \
+            --end 20210331 \
+            --publish \
+            --bucket "$S3_BUCKET" \
+            --region "$AWS_REGION"
+
+      # STEP 10: Ingest all 22 historical quarters
+      - name: Ingest complete FDIC history
+        if: inputs.mode == 'full-backfill'
+        run: |
+          python -m src.ingestion.historical_backfill \
+            --start 20210331 \
+            --end 20260630
+
+      # STEP 11: Transform and upload all 22 quarters
+      - name: Transform and publish complete history
+        if: inputs.mode == 'full-backfill'
+        run: |
+          python -m src.pipeline.run_historical_silver \
+            --start 20210331 \
+            --end 20260630 \
+            --publish \
+            --bucket "$S3_BUCKET" \
+            --region "$AWS_REGION"
+
+      # STEP 12: Confirm S3 publishing
+      - name: Verify published Parquet files
+        if: inputs.mode != 'verify'
+        run: |
+          aws s3 ls \
+            "s3://$S3_BUCKET/silver/fdic/financials/parquet/" \
+            --recursive \
+            --region "$AWS_REGION"
+
+      # STEP 13: Report workflow completion
+      - name: Pipeline completion
+        run: |
+          echo "DataOps Sentinel workflow completed."
+          echo "Mode: ${{ inputs.mode }}"
+          echo "AWS region: $AWS_REGION"

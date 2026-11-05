@@ -1,0 +1,42 @@
+
+name: DataOps Sentinel AWS Silver Pipeline
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  verify-aws:
+    name: Verify GitHub to AWS connection
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::833090648467:role/DataOpsSentinelGitHubS3Publish
+          aws-region: ca-central-1
+          allowed-account-ids: "833090648467"
+
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Verify S3 access
+        run: |
+          aws s3api list-objects-v2 \
+            --bucket dataops-sentinel-lake-ikana-2026 \
+            --prefix silver/fdic/financials/ \
+            --max-items 1
+
+      - name: Confirmation
+        run: |
+          echo "GitHub OIDC authentication successful"
+          echo "AWS S3 access verified"

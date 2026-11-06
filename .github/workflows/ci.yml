@@ -21,7 +21,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest boto3 pyarrow
+          python -m pip install pytest boto3 pyarrow sqlglot
 
       - name: Run automated tests
         run: python -m pytest -v

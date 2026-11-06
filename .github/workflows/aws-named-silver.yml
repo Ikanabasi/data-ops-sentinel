@@ -1,0 +1,112 @@
+
+name: DataOps Sentinel Named Silver Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Choose the publishing operation"
+        required: true
+        type: choice
+        default: verify
+        options:
+          - verify
+          - one-quarter
+          - full-backfill
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: dataops-sentinel-named-publishing
+  cancel-in-progress: false
+
+jobs:
+  named-silver:
+    name: FDIC Named Silver Publishing
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      AWS_REGION: ca-central-1
+      S3_BUCKET: dataops-sentinel-lake-ikana-2026
+
+    steps:
+      # 1. Download project source code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Install Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # 3. Install dependencies for pipeline and tests
+      - name: Install dependencies
+        if: inputs.mode != 'verify'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest boto3 pyarrow
+
+      # 4. Test the project before processing data
+      - name: Run automated tests
+        if: inputs.mode != 'verify'
+        run: python -m pytest -v
+
+      # 5. Authenticate with our existing IAM role
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::833090648467:role/DataOpsSentinelGitHubS3Publish
+          aws-region: ca-central-1
+          allowed-account-ids: "833090648467"
+
+      # 6. Confirm the GitHub-to-AWS identity
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      # 7. Check access to the existing Silver data
+      - name: Verify S3 access
+        run: |
+          aws s3api list-objects-v2 \
+            --bucket "$S3_BUCKET" \
+            --prefix silver/fdic/financials/parquet/ \
+            --max-items 1 \
+            --region "$AWS_REGION"
+
+      # 8. Publish Q2 2026 only
+      - name: Publish one test quarter
+        if: inputs.mode == 'one-quarter'
+        run: |
+          python -m src.pipeline.publish_named_silver \
+            --bucket "$S3_BUCKET" \
+            --region "$AWS_REGION" \
+            --start 20260630 \
+            --end 20260630
+
+      # 9. Publish all 22 historical quarters
+      - name: Publish all historical quarters
+        if: inputs.mode == 'full-backfill'
+        run: |
+          python -m src.pipeline.publish_named_silver \
+            --bucket "$S3_BUCKET" \
+            --region "$AWS_REGION" \
+            --start 20210331 \
+            --end 20260630
+
+      # 10. Verify published named data
+      - name: Verify named Parquet objects
+        if: inputs.mode != 'verify'
+        run: |
+          aws s3 ls \
+            "s3://$S3_BUCKET/silver/fdic/financials/named/" \
+            --recursive \
+            --region "$AWS_REGION"
+
+      # 11. Completion message
+      - name: Pipeline complete
+        run: |
+          echo "Named Silver workflow completed."
+          echo "Mode: ${{ inputs.mode }}"

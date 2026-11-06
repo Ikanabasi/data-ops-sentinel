@@ -73,3 +73,8 @@ jobs:
         if: inputs.deployment_mode == 'deploy'
         run: |
           python -m src.pipeline.deploy_gold_views --deploy --yes
+
+      - name: Validate deployed Gold history
+        if: inputs.deployment_mode == 'deploy'
+        run: |
+          python -m src.pipeline.validate_gold_deployment

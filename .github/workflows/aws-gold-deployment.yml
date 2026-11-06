@@ -1,0 +1,75 @@
+
+name: DataOps Sentinel - Gold Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_mode:
+        description: "Choose deployment mode"
+        required: true
+        type: choice
+        default: dry-run
+        options:
+          - dry-run
+          - deploy
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dataops-sentinel-gold-deployment
+  cancel-in-progress: false
+
+jobs:
+  gold-deployment:
+    name: Validate and Deploy Gold Views
+
+    if: github.ref == 'refs/heads/main'
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest boto3 sqlglot
+
+      - name: Run Gold SQL tests
+        run: |
+          python -m pytest tests/test_gold_sql.py -v
+          python -m pytest tests/test_gold_deployment.py -v
+
+      - name: Validate deployment plan
+        run: |
+          python -m src.pipeline.deploy_gold_views --dry-run
+
+      - name: Configure AWS credentials
+        if: inputs.deployment_mode == 'deploy'
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_GOLD_DEPLOY_ROLE_ARN }}
+          aws-region: ca-central-1
+          allowed-account-ids: "833090648467"
+
+      - name: Verify AWS identity
+        if: inputs.deployment_mode == 'deploy'
+        run: aws sts get-caller-identity
+
+      - name: Deploy Gold views to Athena
+        if: inputs.deployment_mode == 'deploy'
+        run: |
+          python -m src.pipeline.deploy_gold_views --deploy --yes

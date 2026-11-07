@@ -53,6 +53,27 @@ jobs:
         id: refresh
         run: |
           python -m src.pipeline.check_dashboard_refresh --check
+      
+      - name: Run FDIC availability tests
+        run: |
+          python -m pytest tests/test_fdic_new_quarter.py -v
+
+      - name: Check FDIC for new reporting quarter
+        id: fdic
+        run: |
+          python -m src.pipeline.check_fdic_new_quarter --check
+
+      - name: Report FDIC ingestion status
+        run: |
+          if [ "${{ steps.fdic.outputs.ingestion_required }}" = "true" ]; then
+            echo "New FDIC financial quarter detected."
+            echo "Quarter: ${{ steps.fdic.outputs.fdic_date }}"
+            echo "Ingestion is required."
+            echo "Automatic ingestion is not enabled yet."
+          else
+            echo "FDIC financial data is already processed."
+            echo "No ingestion required."
+          fi
 
       - name: Report refresh status
         run: |
@@ -62,3 +83,5 @@ jobs:
           else
             echo "Dashboard snapshots are current."
           fi
+
+      

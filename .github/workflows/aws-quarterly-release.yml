@@ -1,73 +1,225 @@
 
-name: DataOps Sentinel - Final Release Verification
+name: DataOps Sentinel - Automated Quarterly Pipeline
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Plan or run a real quarterly release"
+        type: choice
+        required: true
+        default: plan
+        options:
+          - plan
+          - release
+
+  schedule:
+    - cron: "0 14 * * 1"
 
 permissions:
   contents: read
 
 concurrency:
-  group: dataops-sentinel-final-verification
+  group: dataops-sentinel-quarterly-pipeline
   cancel-in-progress: false
 
 jobs:
-  verify:
-    name: Validate DataOps Sentinel v1.0
+  quarterly-pipeline:
+    name: FDIC to Dashboard
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 90
 
     permissions:
       contents: read
       id-token: write
 
+    env:
+      AUTO_RELEASE_ENABLED: ${{ vars.DATAOPS_AUTO_RELEASE_ENABLED }}
+      BUCKET: dataops-sentinel-lake-ikana-2026
+      AWS_REGION: ca-central-1
+
     steps:
-      - name: Checkout repository
+      - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Configure Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest boto3 pyarrow sqlglot
+          python -m pip install \
+            pytest boto3 pandas numpy pyarrow requests sqlglot
 
-      - name: Run full automated test suite
+      - name: Verify required pipeline modules
         run: |
-          python -m pytest -v
+          python -c "import importlib; modules=[
+          'src.pipeline.plan_quarterly_ingestion',
+          'src.pipeline.run_one_quarter',
+          'src.pipeline.register_athena_partition',
+          'src.pipeline.check_gold_readiness',
+          'src.pipeline.validate_gold_deployment',
+          'src.pipeline.publish_dashboard_snapshot',
+          'src.pipeline.publish_dashboard_history'
+          ]; [importlib.import_module(m) for m in modules]"
 
-      - name: Configure temporary AWS credentials
+      - name: Run automated tests
+        run: python -m pytest -v
+
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.3.0
         with:
           role-to-assume: ${{ vars.AWS_GOLD_DEPLOY_ROLE_ARN }}
           aws-region: ca-central-1
           allowed-account-ids: "833090648467"
 
-      - name: Check FDIC availability
-        run: |
-          python -m src.pipeline.check_fdic_new_quarter --check
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
 
-      - name: Verify quarterly ingestion plan
+      - name: Detect next FDIC quarter
+        id: planner
         run: |
-          python -m src.pipeline.run_one_quarter --plan
+          python -m src.pipeline.plan_quarterly_ingestion --check
 
-      - name: Check partition registration configuration
+      - name: Check existing dashboard snapshots
+        id: before
         run: |
-          python -m src.pipeline.register_athena_partition --plan
+          python -m src.pipeline.check_dashboard_refresh --check
 
-      - name: Check Gold validation configuration
+      - name: Determine execution mode
+        id: control
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_MODE: ${{ inputs.mode }}
         run: |
-          python -m src.pipeline.check_gold_readiness --plan
+          EXECUTE=false
 
-      - name: Final release summary
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] &&
+             [ "$REQUESTED_MODE" = "release" ]; then
+            EXECUTE=true
+          fi
+
+          if [ "$EVENT_NAME" = "schedule" ] &&
+             [ "$AUTO_RELEASE_ENABLED" = "true" ]; then
+            EXECUTE=true
+          fi
+
+          echo "execute=$EXECUTE" >> "$GITHUB_OUTPUT"
+          echo "Live execution enabled: $EXECUTE"
+
+      - name: Report plan
+        if: steps.control.outputs.execute != 'true'
+        env:
+          TARGET: ${{ steps.planner.outputs.target_quarter }}
+          INGEST: ${{ steps.planner.outputs.ingestion_required }}
+          REFRESH: ${{ steps.before.outputs.needs_refresh }}
         run: |
-          echo "DataOps Sentinel v1.0 verification passed."
-          echo "Automated tests: PASSED"
-          echo "FDIC availability: CHECKED"
-          echo "Quarterly ingestion: PLANNED"
-          echo "Partition registration: CONFIGURATION CHECKED"
-          echo "Gold readiness: CONFIGURATION CHECKED"
+          echo "Read-only plan completed."
+          echo "Target quarter: $TARGET"
+          echo "Ingestion required: $INGEST"
+          echo "Dashboard refresh required: $REFRESH"
           echo "No AWS data was modified."
+
+      - name: Process new FDIC quarter
+        if: |
+          steps.control.outputs.execute == 'true' &&
+          steps.planner.outputs.ingestion_required == 'true'
+        run: |
+          python -m src.pipeline.run_one_quarter --execute --yes
+
+      - name: Recheck Silver and dashboard state
+        if: steps.control.outputs.execute == 'true'
+        id: after
+        run: |
+          python -m src.pipeline.check_dashboard_refresh --check
+
+      - name: Confirm target quarter matches Silver
+        if: |
+          steps.control.outputs.execute == 'true' &&
+          steps.planner.outputs.ingestion_required == 'true'
+        env:
+          TARGET: ${{ steps.planner.outputs.target_quarter }}
+          SILVER: ${{ steps.after.outputs.silver_date }}
+        run: |
+          test "$TARGET" = "$SILVER" || {
+            echo "Silver quarter does not match the target."
+            exit 1
+          }
+
+      - name: Register missing Athena partition
+        if: |
+          steps.control.outputs.execute == 'true' &&
+          steps.after.outputs.needs_refresh == 'true'
+        env:
+          TARGET: ${{ steps.after.outputs.silver_date }}
+        run: |
+          python -m src.pipeline.register_athena_partition \
+            --register "$TARGET" --yes
+
+      - name: Validate Gold readiness
+        if: |
+          steps.control.outputs.execute == 'true' &&
+          steps.after.outputs.needs_refresh == 'true'
+        env:
+          TARGET: ${{ steps.after.outputs.silver_date }}
+        run: |
+          python -m src.pipeline.check_gold_readiness \
+            --check "$TARGET"
+
+      - name: Validate complete Gold history
+        if: |
+          steps.control.outputs.execute == 'true' &&
+          steps.after.outputs.needs_refresh == 'true'
+        env:
+          TARGET: ${{ steps.after.outputs.silver_date }}
+        run: |
+          python -m src.pipeline.validate_gold_deployment \
+            --expected-quarter "$TARGET"
+
+      - name: Publish historical snapshot
+        if: |
+          steps.control.outputs.execute == 'true' &&
+          steps.after.outputs.needs_refresh == 'true'
+        run: |
+          python -m src.pipeline.publish_dashboard_history --publish
+
+      - name: Publish current-quarter snapshot
+        if: |
+          steps.control.outputs.execute == 'true' &&
+          steps.after.outputs.needs_refresh == 'true'
+        run: |
+          python -m src.pipeline.publish_dashboard_snapshot --publish
+
+      - name: Verify final snapshot state
+        if: |
+          steps.control.outputs.execute == 'true' &&
+          steps.after.outputs.needs_refresh == 'true'
+        id: final
+        run: |
+          python -m src.pipeline.check_dashboard_refresh --check
+
+      - name: Require synchronized snapshots
+        if: |
+          steps.control.outputs.execute == 'true' &&
+          steps.after.outputs.needs_refresh == 'true'
+        env:
+          NEEDS_REFRESH: ${{ steps.final.outputs.needs_refresh }}
+        run: |
+          if [ "$NEEDS_REFRESH" != "false" ]; then
+            echo "Dashboard snapshots remain behind Silver."
+            exit 1
+          fi
+
+          echo "Both dashboard snapshots are current."
+
+      - name: Final summary
+        if: success()
+        env:
+          EXECUTE: ${{ steps.control.outputs.execute }}
+          INGEST: ${{ steps.planner.outputs.ingestion_required }}
+        run: |
+          echo "DATAOPS SENTINEL PIPELINE PASSED"
+          echo "Execution mode: $EXECUTE"
+          echo "New-quarter ingestion required: $INGEST"

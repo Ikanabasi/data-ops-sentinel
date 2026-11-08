@@ -1,19 +1,35 @@
 
+"""
+DataOps Sentinel — Current Dashboard Data Loader
+
+Supports:
+1. Validated local portfolio snapshots for free hosting.
+2. Private AWS S3 snapshots when explicitly selected.
+
+Preserves manifest validation, SHA-256 verification,
+required columns and bank-record uniqueness checks.
+"""
+
 import hashlib
 import io
 import json
 import re
 
-import boto3
 import pandas as pd
 import streamlit as st
+
+try:
+    from dashboard.portfolio_s3 import get_portfolio_or_s3_client
+except ModuleNotFoundError:
+    from portfolio_s3 import get_portfolio_or_s3_client
 
 
 BUCKET = "dataops-sentinel-lake-ikana-2026"
 REGION = "ca-central-1"
-LATEST_KEY = "dashboard/gold/latest.json"
 
+LATEST_KEY = "dashboard/gold/latest.json"
 SNAPSHOT_PREFIX = "dashboard/gold/snapshots/"
+
 
 REQUIRED_COLUMNS = {
     "CERT",
@@ -33,27 +49,31 @@ REQUIRED_COLUMNS = {
 
 def get_s3_client():
     """
-    Use AWS credentials from the environment.
+    Select the configured storage source.
 
-    No AWS access keys are stored in this code.
+    Portfolio mode:
+        Read bundled local snapshots.
+
+    AWS mode:
+        Read private S3 snapshots using local
+        AWS credentials.
+
+    No AWS credentials are stored in this file.
     """
-    return boto3.client(
-        "s3",
-        region_name=REGION,
-    )
+    return get_portfolio_or_s3_client(REGION)
 
 
 @st.cache_data(ttl=300, max_entries=1)
 def get_latest_manifest():
     """
-    Read the latest published manifest.
+    Read and validate the latest dashboard manifest.
 
-    Cache for five minutes to avoid requesting
-    latest.json on every widget interaction.
+    Cached for five minutes to reduce repeated reads.
     """
-    s3 = get_s3_client()
 
-    response = s3.get_object(
+    client = get_s3_client()
+
+    response = client.get_object(
         Bucket=BUCKET,
         Key=LATEST_KEY,
     )
@@ -71,16 +91,18 @@ def get_latest_manifest():
     }
 
     if not required_fields.issubset(manifest):
+        missing = required_fields - set(manifest)
+
         raise ValueError(
-            "Manifest is missing required fields"
+            f"Dashboard manifest missing fields: "
+            f"{sorted(missing)}"
         )
 
-    if not re.fullmatch(
-        r"\d{8}",
-        str(manifest["report_date"]),
-    ):
+    report_date = str(manifest["report_date"])
+
+    if not re.fullmatch(r"\d{8}", report_date):
         raise ValueError(
-            "Invalid manifest reporting date"
+            "Invalid dashboard reporting date"
         )
 
     snapshot_key = manifest["snapshot_key"]
@@ -92,7 +114,7 @@ def get_latest_manifest():
         or not snapshot_key.endswith(".csv")
     ):
         raise ValueError(
-            "Invalid snapshot object key"
+            "Invalid dashboard snapshot key"
         )
 
     expected_hash = manifest["sha256"]
@@ -105,16 +127,17 @@ def get_latest_manifest():
         )
     ):
         raise ValueError(
-            "Invalid SHA-256 checksum"
+            "Invalid dashboard SHA-256 checksum"
         )
 
+    total_records = manifest["total_records"]
+
     if (
-        not isinstance(manifest["total_records"], int)
-        or isinstance(manifest["total_records"], bool)
-        or manifest["total_records"] <= 0
+        type(total_records) is not int
+        or total_records <= 0
     ):
         raise ValueError(
-            "Invalid expected record count"
+            "Invalid dashboard record count"
         )
 
     return manifest
@@ -123,15 +146,14 @@ def get_latest_manifest():
 @st.cache_data(ttl=3600, max_entries=3)
 def load_snapshot(snapshot_key, expected_hash):
     """
-    Load one versioned snapshot from S3.
+    Load a versioned current-quarter snapshot.
 
-    Data is cached by snapshot key and checksum.
-    A new checksum causes the new snapshot
-    to be loaded automatically.
+    Verify the file checksum before loading it.
     """
-    s3 = get_s3_client()
 
-    response = s3.get_object(
+    client = get_s3_client()
+
+    response = client.get_object(
         Bucket=BUCKET,
         Key=snapshot_key,
     )
@@ -144,7 +166,7 @@ def load_snapshot(snapshot_key, expected_hash):
 
     if actual_hash.lower() != expected_hash.lower():
         raise ValueError(
-            "Snapshot SHA-256 verification failed"
+            "Dashboard snapshot SHA-256 verification failed"
         )
 
     df = pd.read_csv(
@@ -155,32 +177,59 @@ def load_snapshot(snapshot_key, expected_hash):
         },
     )
 
-    missing_columns = REQUIRED_COLUMNS - set(df.columns)
+    missing_columns = (
+        REQUIRED_COLUMNS - set(df.columns)
+    )
 
     if missing_columns:
         raise ValueError(
-            f"Missing data columns: {sorted(missing_columns)}"
+            "Missing dashboard data columns: "
+            f"{sorted(missing_columns)}"
+        )
+
+    if df.empty:
+        raise ValueError(
+            "Dashboard snapshot contains no records"
         )
 
     if df["CERT"].isna().any():
         raise ValueError(
-            "Snapshot has missing bank certificates"
+            "Dashboard contains missing bank certificates"
         )
 
     if df["CERT"].duplicated().any():
         raise ValueError(
-            "Snapshot has duplicate bank certificates"
+            "Dashboard contains duplicate bank certificates"
         )
 
     if df["BANK_NAME"].isna().any():
         raise ValueError(
-            "Snapshot has missing bank names"
+            "Dashboard contains missing bank names"
+        )
+
+    if (
+        df["BANK_NAME"]
+        .astype(str)
+        .str.strip()
+        .eq("")
+        .any()
+    ):
+        raise ValueError(
+            "Dashboard contains empty bank names"
         )
 
     df["alert_count"] = pd.to_numeric(
         df["alert_count"],
         errors="raise",
     )
+
+    if (
+        df["alert_count"].isna().any()
+        or not df["alert_count"].between(0, 5).all()
+    ):
+        raise ValueError(
+            "Invalid dashboard alert counts"
+        )
 
     df["has_data_limitation"] = (
         df["has_data_limitation"]
@@ -194,7 +243,7 @@ def load_snapshot(snapshot_key, expected_hash):
 
     if df["has_data_limitation"].isna().any():
         raise ValueError(
-            "Invalid data limitation values"
+            "Invalid dashboard data limitation values"
         )
 
     return df
@@ -202,8 +251,12 @@ def load_snapshot(snapshot_key, expected_hash):
 
 def get_dashboard_data():
     """
-    Retrieve the latest validated dashboard dataset.
+    Return the current validated dataset and manifest.
+
+    The function signature is unchanged, so the
+    existing Streamlit app continues to work.
     """
+
     manifest = get_latest_manifest()
 
     df = load_snapshot(
@@ -217,10 +270,10 @@ def get_dashboard_data():
         )
 
     if not df["report_date"].eq(
-        manifest["report_date"]
+        str(manifest["report_date"])
     ).all():
         raise ValueError(
-            "Dashboard snapshot contains an unexpected quarter"
+            "Dashboard contains an unexpected reporting quarter"
         )
 
     return df, manifest

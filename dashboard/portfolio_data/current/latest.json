@@ -1,0 +1,9 @@
+{
+  "report_date": "20260630",
+  "published_at": "2026-11-07T20:15:28.016489+00:00",
+  "total_records": 4313,
+  "unique_banks": 4313,
+  "snapshot_key": "dashboard/gold/snapshots/report_date=20260630/ec83dc8fb0857b84875eb2c22db59b704181d28f1b469bf0df911a66dae94473.csv",
+  "sha256": "ec83dc8fb0857b84875eb2c22db59b704181d28f1b469bf0df911a66dae94473",
+  "source_view": "dataops_sentinel.gold_unified_bank_monitoring"
+}

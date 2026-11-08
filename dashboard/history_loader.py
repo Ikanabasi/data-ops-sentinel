@@ -1,12 +1,34 @@
 
+"""
+DataOps Sentinel — Historical Dashboard Data Loader
+
+Supports validated portfolio snapshots and private S3.
+
+Preserves:
+- SHA-256 verification
+- Historical record counts
+- Quarterly reporting counts
+- Duplicate bank-quarter detection
+- Numeric conversion
+- Financial amounts in USD billions for compatibility
+  with the existing Streamlit application
+
+The app.py presentation layer converts billions to
+millions for the financial charts.
+"""
+
 import hashlib
 import io
 import json
 import re
 
-import boto3
 import pandas as pd
 import streamlit as st
+
+try:
+    from dashboard.portfolio_s3 import get_portfolio_or_s3_client
+except ModuleNotFoundError:
+    from portfolio_s3 import get_portfolio_or_s3_client
 
 
 BUCKET = "dataops-sentinel-lake-ikana-2026"
@@ -14,6 +36,7 @@ REGION = "ca-central-1"
 
 HISTORY_MANIFEST = "dashboard/history/latest.json"
 HISTORY_PREFIX = "dashboard/history/snapshots/"
+
 
 REQUIRED_COLUMNS = {
     "CERT",
@@ -35,6 +58,7 @@ REQUIRED_COLUMNS = {
     "investigation_priority",
 }
 
+
 NUMERIC_COLUMNS = [
     "DEP",
     "ASSET",
@@ -53,20 +77,29 @@ NUMERIC_COLUMNS = [
 
 
 def get_s3_client():
-    """Use the existing AWS CLI or environment credentials."""
-    return boto3.client(
-        "s3",
-        region_name=REGION,
-    )
+    """
+    Use the portfolio adapter.
+
+    Bundled data is used when local portfolio
+    snapshots are available.
+
+    Live S3 can be selected explicitly using:
+        DATAOPS_DATA_SOURCE=s3
+    """
+    return get_portfolio_or_s3_client(REGION)
 
 
 @st.cache_data(ttl=300, max_entries=1)
 def get_history_manifest():
-    """Read the latest historical manifest every 5 minutes."""
+    """
+    Read and validate the historical manifest.
 
-    s3 = get_s3_client()
+    The manifest is cached for five minutes.
+    """
 
-    response = s3.get_object(
+    client = get_s3_client()
+
+    response = client.get_object(
         Bucket=BUCKET,
         Key=HISTORY_MANIFEST,
     )
@@ -75,7 +108,7 @@ def get_history_manifest():
         response["Body"].read().decode("utf-8")
     )
 
-    required = {
+    required_fields = {
         "snapshot_key",
         "sha256",
         "total_records",
@@ -85,36 +118,69 @@ def get_history_manifest():
         "published_at",
     }
 
-    if not required.issubset(manifest):
+    if not required_fields.issubset(manifest):
+        missing = required_fields - set(manifest)
+
         raise ValueError(
-            "Historical manifest is missing required fields"
+            "Historical manifest missing fields: "
+            f"{sorted(missing)}"
         )
 
-    key = manifest["snapshot_key"]
-    checksum = manifest["sha256"]
+    snapshot_key = manifest["snapshot_key"]
 
     if (
-        not isinstance(key, str)
-        or not key.startswith(HISTORY_PREFIX)
-        or ".." in key
-        or not key.endswith(".csv")
+        not isinstance(snapshot_key, str)
+        or not snapshot_key.startswith(HISTORY_PREFIX)
+        or ".." in snapshot_key
+        or not snapshot_key.endswith(".csv")
     ):
-        raise ValueError("Invalid historical snapshot key")
+        raise ValueError(
+            "Invalid historical snapshot key"
+        )
+
+    expected_hash = manifest["sha256"]
 
     if (
-        not isinstance(checksum, str)
-        or not re.fullmatch(r"[a-fA-F0-9]{64}", checksum)
+        not isinstance(expected_hash, str)
+        or not re.fullmatch(
+            r"[a-fA-F0-9]{64}",
+            expected_hash,
+        )
     ):
-        raise ValueError("Invalid historical checksum")
+        raise ValueError(
+            "Invalid historical SHA-256 checksum"
+        )
 
     if (
         type(manifest["total_records"]) is not int
         or manifest["total_records"] <= 0
     ):
-        raise ValueError("Invalid history record count")
+        raise ValueError(
+            "Invalid historical record count"
+        )
 
-    if not isinstance(manifest["quarter_counts"], dict):
-        raise ValueError("Invalid quarter counts")
+    if (
+        type(manifest["quarters"]) is not int
+        or manifest["quarters"] <= 0
+    ):
+        raise ValueError(
+            "Invalid historical quarter total"
+        )
+
+    if not isinstance(
+        manifest["quarter_counts"], dict
+    ):
+        raise ValueError(
+            "Invalid historical quarter counts"
+        )
+
+    if not re.fullmatch(
+        r"\d{8}",
+        str(manifest["latest_report_date"]),
+    ):
+        raise ValueError(
+            "Invalid latest historical reporting date"
+        )
 
     return manifest
 
@@ -122,68 +188,93 @@ def get_history_manifest():
 @st.cache_data(ttl=3600, max_entries=2)
 def load_history_snapshot(snapshot_key, checksum):
     """
-    Download and validate a versioned historical snapshot.
+    Read and validate the full historical snapshot.
 
-    The cache key changes when a new snapshot is published.
+    Preserves the column names expected by app.py.
     """
 
-    s3 = get_s3_client()
+    client = get_s3_client()
 
-    response = s3.get_object(
+    response = client.get_object(
         Bucket=BUCKET,
         Key=snapshot_key,
     )
 
-    content = response["Body"].read()
+    csv_bytes = response["Body"].read()
 
     actual_checksum = hashlib.sha256(
-        content
+        csv_bytes
     ).hexdigest()
 
     if actual_checksum.lower() != checksum.lower():
         raise ValueError(
-            "Historical snapshot checksum mismatch"
+            "Historical snapshot SHA-256 checksum mismatch"
         )
 
     df = pd.read_csv(
-        io.BytesIO(content),
+        io.BytesIO(csv_bytes),
         dtype={
             "CERT": str,
             "report_date": str,
         },
     )
 
-    missing = REQUIRED_COLUMNS - set(df.columns)
+    missing_columns = (
+        REQUIRED_COLUMNS - set(df.columns)
+    )
 
-    if missing:
+    if missing_columns:
         raise ValueError(
-            f"Historical columns missing: {sorted(missing)}"
+            "Historical columns missing: "
+            f"{sorted(missing_columns)}"
+        )
+
+    if df.empty:
+        raise ValueError(
+            "Historical snapshot contains no records"
         )
 
     if df["CERT"].isna().any():
-        raise ValueError("Missing bank certificate")
+        raise ValueError(
+            "Historical data contains missing bank certificates"
+        )
 
     if df["BANK_NAME"].isna().any():
-        raise ValueError("Missing bank name")
+        raise ValueError(
+            "Historical data contains missing bank names"
+        )
 
-    if df["BANK_NAME"].astype(str).str.strip().eq("").any():
-        raise ValueError("Empty bank name")
+    if (
+        df["BANK_NAME"]
+        .astype(str)
+        .str.strip()
+        .eq("")
+        .any()
+    ):
+        raise ValueError(
+            "Historical data contains empty bank names"
+        )
 
     if df["report_date"].isna().any():
-        raise ValueError("Missing report date")
+        raise ValueError(
+            "Historical data contains missing reporting dates"
+        )
 
     if df.duplicated(
         subset=["CERT", "report_date"]
     ).any():
         raise ValueError(
-            "Duplicate bank-quarter in historical data"
+            "Duplicate bank-quarter records found"
         )
 
     if not df["report_date"].str.fullmatch(
         r"\d{8}"
     ).all():
-        raise ValueError("Invalid historical report date")
+        raise ValueError(
+            "Invalid historical reporting date format"
+        )
 
+    # Convert financial and monitoring values to numbers.
     for column in NUMERIC_COLUMNS:
         df[column] = pd.to_numeric(
             df[column],
@@ -194,22 +285,29 @@ def load_history_snapshot(snapshot_key, checksum):
         df["alert_count"].isna().any()
         or not df["alert_count"].between(0, 5).all()
     ):
-        raise ValueError("Invalid historical alert counts")
+        raise ValueError(
+            "Invalid historical alert counts"
+        )
 
+    # Create real dates for Plotly time-series charts.
     df["quarter_date"] = pd.to_datetime(
         df["report_date"],
         format="%Y%m%d",
         errors="raise",
     )
 
+    # Human-readable labels such as 2026 Q2.
     df["quarter_label"] = (
         df["quarter_date"].dt.year.astype(str)
         + " Q"
         + df["quarter_date"].dt.quarter.astype(str)
     )
 
-    # FDIC balance-sheet amounts are in USD thousands.
-    # Convert to USD billions for easier chart reading.
+    # FDIC monetary values are reported in USD thousands.
+    #
+    # Keep these BILLIONS columns because the existing
+    # app.py uses them. The revised UI multiplies them
+    # by 1,000 to display USD millions.
     for column in ["DEP", "ASSET", "LNLSGR"]:
         df[f"{column}_USD_BILLIONS"] = (
             df[column] / 1_000_000
@@ -219,7 +317,12 @@ def load_history_snapshot(snapshot_key, checksum):
 
 
 def get_history_data():
-    """Return the latest verified historical dataset."""
+    """
+    Return the verified historical dataset and manifest.
+
+    Verify total records, reporting-quarter counts,
+    quarter coverage and latest reporting period.
+    """
 
     manifest = get_history_manifest()
 
@@ -230,21 +333,21 @@ def get_history_data():
 
     if len(df) != manifest["total_records"]:
         raise ValueError(
-            "Historical record count mismatch"
+            "Historical record count does not match manifest"
         )
 
     actual_counts = {
-        str(date): int(count)
-        for date, count in df.groupby(
-            "report_date"
-        ).size().items()
+        str(report_date): int(count)
+        for report_date, count in (
+            df.groupby("report_date").size().items()
+        )
     }
 
     expected_counts = {
-        str(date): int(count)
-        for date, count in manifest[
-            "quarter_counts"
-        ].items()
+        str(report_date): int(count)
+        for report_date, count in (
+            manifest["quarter_counts"].items()
+        )
     }
 
     if actual_counts != expected_counts:
@@ -254,12 +357,14 @@ def get_history_data():
 
     if len(actual_counts) != manifest["quarters"]:
         raise ValueError(
-            "Historical quarter total mismatch"
+            "Historical quarter total does not match manifest"
         )
 
-    if max(actual_counts) != manifest["latest_report_date"]:
+    if max(actual_counts) != str(
+        manifest["latest_report_date"]
+    ):
         raise ValueError(
-            "Latest historical quarter mismatch"
+            "Latest historical quarter does not match manifest"
         )
 
     return df, manifest
